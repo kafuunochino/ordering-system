@@ -22,7 +22,7 @@ from .storage import Store
 from .report_ui import RevenuePage
 from .theme import apply_theme, apply_window_theme
 from .widgets import ComboBox as QComboBox, CheckBox as QCheckBox
-from .widgets import (CardGrid, DateEdit, action, clear_layout, data_table, divider, fill_table,
+from .widgets import (CardGrid, DateEdit, PanelSplitter, action, clear_layout, data_table, divider, fill_table,
     hbox, line_icon, panel, scroll, selected_id, text, tile, vbox)
 
 
@@ -224,10 +224,11 @@ class App(QMainWindow):
         self.navigate(0)
 
     def _build_order(self):
-        outer = hbox(self.order_page, 18, 16)
+        outer = hbox(self.order_page, 18, 0)
+        self.order_splitter = PanelSplitter(self.store.settings()["cashier_layout"])
+        outer.addWidget(self.order_splitter)
         table_panel = panel()
-        table_panel.setMinimumWidth(210)
-        table_panel.setMaximumWidth(282)
+        table_panel.setMinimumWidth(220)
         table_layout = vbox(table_panel, 16, 12)
         row = hbox(spacing=8)
         row.addWidget(text("桌台", "heading"))
@@ -248,11 +249,11 @@ class App(QMainWindow):
             self.table_filter_group.addButton(btn)
             filters.addWidget(btn)
         table_layout.addLayout(filters)
-        self.table_grid = CardGrid(96, 122, 2)
+        self.table_grid = CardGrid(106, 134, 6)
         table_layout.addWidget(scroll(self.table_grid), 1)
-        outer.addWidget(table_panel, 2)
+        self.order_splitter.addWidget(table_panel)
         menu_panel = QWidget()
-        menu_panel.setMinimumWidth(240)
+        menu_panel.setMinimumWidth(254)
         menu_layout = vbox(menu_panel, 0, 15)
         top = hbox()
         top.addWidget(text("选择餐品", "heading"))
@@ -282,10 +283,9 @@ class App(QMainWindow):
         self.menu_empty.hide()
         menu_layout.addWidget(self.menu_empty)
         menu_layout.addWidget(text("点击餐品卡片，直接加入本桌账单", "small"))
-        outer.addWidget(menu_panel, 4)
+        self.order_splitter.addWidget(menu_panel)
         cart_panel = panel()
         cart_panel.setMinimumWidth(302)
-        cart_panel.setMaximumWidth(380)
         cart_layout = vbox(cart_panel, 20, 13)
         row = hbox()
         row.addWidget(text("当前账单", "heading"))
@@ -327,7 +327,18 @@ class App(QMainWindow):
         self.checkout_button.setFixedHeight(54)
         cart_layout.addWidget(self.checkout_button)
         cart_layout.addWidget(action("取消本桌订单", self.cancel_order, "quiet"))
-        outer.addWidget(cart_panel, 3)
+        self.order_splitter.addWidget(cart_panel)
+        for index in range(3):
+            self.order_splitter.setStretchFactor(index, 1)
+        for index, name in ((1, "调整桌台与餐品区域宽度"), (2, "调整餐品与账单区域宽度")):
+            self.order_splitter.handle(index).setAccessibleName(name)
+        self.order_splitter.sizesCommitted.connect(self.save_cashier_layout)
+
+    def save_cashier_layout(self, sizes):
+        def save():
+            self.store.save_cashier_layout(sizes)
+            self.status.setText("● 收银台布局已保存 · 双击分隔线可恢复默认")
+        self.run_action(save)
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
@@ -450,6 +461,10 @@ class App(QMainWindow):
         order = self.current_order
         self.cart_title.setText(table["name"])
         self.cart_badge.setText("用餐中" if order else "空闲")
+        if self.cart_badge.property("occupied") != bool(order):
+            self.cart_badge.setProperty("occupied", bool(order))
+            self.cart_badge.style().unpolish(self.cart_badge)
+            self.cart_badge.style().polish(self.cart_badge)
         self.order_hint.setText(f"SM{order['id']:08d}  ·  {order['opened_at'][11:16]} 开单" if order else "添加餐品后自动开单")
         clear_layout(self.cart_items)
         for item in order["items"] if order else []:

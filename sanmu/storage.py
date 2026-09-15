@@ -143,7 +143,8 @@ class Store:
 
     def settings(self) -> dict:
         defaults = {"shop_name": "三木点餐系统", "receipt_footer": "谢谢惠顾，欢迎再次光临！",
-                    "printer_name": "", "paper_width": "80", "auto_print": False, "theme": "light", "logo_id": ""}
+                    "printer_name": "", "paper_width": "80", "auto_print": False, "theme": "light", "logo_id": "",
+                    "cashier_layout": None}
         for row in self.db.execute("SELECT key,value FROM settings"):
             defaults[row["key"]] = json.loads(row["value"])
         return defaults
@@ -186,6 +187,13 @@ class Store:
             self.db.execute("INSERT INTO settings(key,value) VALUES ('logo_id',?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(asset_id),))
         return asset_id
+
+    def save_cashier_layout(self, sizes: list[int]):
+        if not isinstance(sizes, list) or len(sizes) != 3 or not all(type(v) is int and 0 < v <= 100000 for v in sizes):
+            raise ValidationError("收银台布局需要三个有效的区域宽度。")
+        with self.transaction():
+            self.db.execute("INSERT INTO settings(key,value) VALUES ('cashier_layout',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(sizes),))
 
     def remove_logo(self):
         # 历史小票仍引用旧资源，清除当前设置时不删除图片。

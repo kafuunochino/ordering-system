@@ -9,12 +9,13 @@ from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDateEdit, QAbstractItemView
+from PySide6.QtWidgets import QApplication, QDateEdit, QAbstractItemView, QLabel
 
 from sanmu.storage import Store
 from sanmu.ui import App, ReceiptDialog
 from sanmu.receipt_render import ReceiptLayout, font
 from sanmu.printing import print_receipt
+from sanmu.theme import PALETTES
 from tests.receipt_cases import sample_logo, sample_receipt
 from PySide6.QtGui import QFontMetricsF
 
@@ -119,6 +120,126 @@ class DesktopSmoke(unittest.TestCase):
         for page in range(app.stack.count()):
             app.navigate(page)
             self.qt.processEvents()
+
+    def drag_panel_handle(self, index, distance):
+        handle = self.app.order_splitter.handle(index)
+        start = handle.rect().center()
+        destination = handle.mapToGlobal(start) + QPoint(distance, 0)
+        QTest.mousePress(handle, Qt.LeftButton, pos=start)
+        QTest.mouseMove(handle, handle.mapFromGlobal(destination), delay=20)
+        QTest.mouseRelease(handle, Qt.LeftButton, pos=handle.mapFromGlobal(destination))
+        QTest.qWait(25)
+
+    def test_both_panel_boundaries_drag_reflow_and_preserve_checkout_in_both_themes(self):
+        app = self.app
+        app.add_item(app.store.products()[0]["id"])
+        order = app.current_order
+        for theme in (0, 1):
+            with self.subTest(theme=theme):
+                app.theme_combo.setCurrentIndex(theme)
+                app.resize(1440, 900)
+                app.order_splitter.reset_sizes()
+                QTest.qWait(25)
+                before = app.order_splitter.sizes()
+                columns = app.table_grid.columns
+                self.assertEqual(app.order_splitter.handle(1).cursor().shape(), Qt.SplitHCursor)
+                self.drag_panel_handle(1, 140)
+                after_left = app.order_splitter.sizes()
+                self.assertGreater(after_left[0], before[0] + 100)
+                self.assertLess(after_left[1], before[1])
+                self.assertGreater(app.table_grid.columns, columns)
+                self.drag_panel_handle(2, -70)
+                after_right = app.order_splitter.sizes()
+                self.assertGreater(after_right[2], after_left[2] + 40)
+                self.assertLess(after_right[1], after_left[1])
+                self.assertEqual(app.store.settings()["cashier_layout"], after_right)
+                for index, distance in ((1, -2000), (2, 2000), (1, 2000), (2, -2000)):
+                    self.drag_panel_handle(index, distance)
+                    for pane in range(3):
+                        self.assertGreaterEqual(app.order_splitter.sizes()[pane],
+                                                app.order_splitter.widget(pane).minimumWidth())
+                    for grid in (app.table_grid, app.product_grid):
+                        self.assertLessEqual(grid.width(), grid.parentWidget().width())
+                app.resize(1100, 700)
+                QTest.qWait(25)
+                self.assertLessEqual(app.width(), 1100)
+                self.assertTrue(app.checkout_button.isEnabled())
+                bottom = app.checkout_button.mapTo(app, app.checkout_button.rect().bottomRight())
+                self.assertTrue(app.rect().contains(bottom))
+                self.assertEqual(app.current_order, order)
+
+    def test_panel_widths_survive_refresh_theme_restart_and_double_click_reset(self):
+        app = self.app
+        splitter = app.order_splitter
+        original = splitter.sizes()
+        self.drag_panel_handle(1, 110)
+        self.drag_panel_handle(2, -45)
+        saved = splitter.sizes()
+        self.assertNotEqual(saved, original)
+        app.refresh()
+        for page in range(app.stack.count()):
+            app.navigate(page)
+            self.qt.processEvents()
+        app.theme_combo.setCurrentIndex(1)
+        app.navigate(0)
+        QTest.qWait(25)
+        self.assertEqual(splitter.sizes(), saved)
+        app.close()
+        self.qt.processEvents()
+        self.app = App(Store(Path(self.temporary.name) / "ui.sqlite3"))
+        self.app.show()
+        QTest.qWait(25)
+        splitter = self.app.order_splitter
+        self.assertEqual(splitter.sizes(), saved)
+        handle = splitter.handle(1)
+        QTest.mouseDClick(handle, Qt.LeftButton, pos=handle.rect().center())
+        QTest.qWait(25)
+        self.assertEqual(splitter.sizes(), original)
+        self.assertEqual(self.app.store.settings()["cashier_layout"], original)
+        # 分隔线也能通过键盘微调，修改后同样保存。
+        QTest.keyClick(handle, Qt.Key_Right)
+        self.assertGreater(splitter.sizes()[0], original[0])
+        self.assertEqual(self.app.store.settings()["cashier_layout"], splitter.sizes())
+
+    def test_busy_table_full_card_color_selection_and_release_in_both_themes(self):
+        app = self.app
+        product_id = app.store.products()[0]["id"]
+        for theme, mode in ((0, "light"), (1, "dark")):
+            with self.subTest(theme=mode):
+                app.theme_combo.setCurrentIndex(theme)
+                order_id = app.store.add_item(1, product_id)
+                app.select_table(2)
+                QTest.mouseMove(app, QPoint(150, 40))
+                QTest.qWait(25)
+                busy, free = app.table_grid.cards[:2]
+                self.assertTrue(busy.property("occupied"))
+                self.assertFalse(free.property("occupied"))
+                self.assertEqual(busy.findChild(QLabel, "TableState").text(), "● 用餐中")
+                self.assertEqual(free.findChild(QLabel, "TableState").text(), "空闲")
+                for card, color in ((busy, "busy_bg"), (free, "soft")):
+                    image = card.grab().toImage()
+                    for x, y in ((8, 80), (image.width()-8, 80), (image.width()//2, 90)):
+                        self.assertEqual(image.pixelColor(x, y).name().upper(), PALETTES[mode][color])
+                app.select_table(1)
+                QTest.qWait(25)
+                selected = app.table_grid.cards[0]
+                self.assertTrue(selected.isChecked())
+                self.assertEqual(selected.grab().toImage().pixelColor(8, 80).name().upper(),
+                                 PALETTES[mode]["busy_selected"])
+                # 结算及移除最后一项两种路径均立即恢复空闲样式。
+                if theme == 0:
+                    order = app.store.order(order_id)
+                    app.store.checkout(order_id, "2", "10", "", order["revision"])
+                    app.refresh()
+                else:
+                    app.remove_item(app.current_order["items"][0]["id"])
+                QTest.qWait(25)
+                released = app.table_grid.cards[0]
+                self.assertFalse(released.property("occupied"))
+                self.assertEqual(released.findChild(QLabel, "TableState").text(), "空闲")
+                self.assertFalse(app.cart_badge.property("occupied"))
+                self.assertEqual(released.grab().toImage().pixelColor(8, 80).name().upper(),
+                                 PALETTES[mode]["soft"])
 
     def make_report_order(self, timestamp, status="paid", base="100.01", discount="8.5"):
         with patch("sanmu.storage.timestamp", return_value=timestamp):

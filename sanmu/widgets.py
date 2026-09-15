@@ -2,13 +2,108 @@
 
 from math import ceil
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QDate, QLocale, QEvent
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QDate, QLocale, QEvent, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPalette, QTextCharFormat
 from PySide6.QtWidgets import (QAbstractItemView, QCalendarWidget, QDateEdit, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
                                QLabel, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget, QStyle, QStyleOptionButton, QToolButton, QApplication)
+                               QVBoxLayout, QWidget, QStyle, QStyleOptionButton, QToolButton, QApplication,
+                               QSplitter, QSplitterHandle, QSizePolicy)
 
 from .theme import PALETTES
+
+
+class PanelSplitter(QSplitter):
+    """可拖动的收银台三栏；在首次可见时恢复比例，刷新内容不重置宽度。"""
+    sizesCommitted = Signal(list)
+    DEFAULT_SIZES = [270, 602, 360]
+
+    def __init__(self, sizes=None):
+        super().__init__(Qt.Horizontal)
+        self.setObjectName("CashierSplitter")
+        self.setChildrenCollapsible(False)
+        self.setOpaqueResize(True)
+        self.setHandleWidth(16)
+        valid = isinstance(sizes, list) and len(sizes) == 3 and all(type(v) is int and 0 < v <= 100000 for v in sizes)
+        self.initial_sizes = sizes[:] if valid else self.DEFAULT_SIZES[:]
+        self.restored = False
+
+    def createHandle(self):
+        return PanelHandle(self.orientation(), self)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.restored:
+            self.setSizes(self.initial_sizes)
+            self.restored = True
+
+    def reset_sizes(self):
+        self.setSizes(self.DEFAULT_SIZES)
+        self.sizesCommitted.emit(self.sizes())
+
+
+class PanelHandle(QSplitterHandle):
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.hovered = self.dragging = False
+        self.before_drag = []
+        self.setCursor(Qt.SplitHCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("按住分隔线左右拖动；双击恢复默认布局")
+
+    def enterEvent(self, event):
+        self.hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.before_drag = self.splitter().sizes()
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            self.update()
+            if self.before_drag != self.splitter().sizes():
+                self.splitter().sizesCommitted.emit(self.splitter().sizes())
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.splitter().reset_sizes()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Left, Qt.Key_Right):
+            self.moveSplitter(self.pos().x() + (20 if event.key() == Qt.Key_Right else -20))
+            self.splitter().sizesCommitted.emit(self.splitter().sizes())
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        colors = PALETTES[QApplication.instance().property("sanmuTheme") or "light"]
+        active = self.hovered or self.dragging or self.hasFocus()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if active:
+            painter.fillRect(self.rect(), QColor(colors["soft"]))
+        x = self.width() / 2
+        painter.setPen(QPen(QColor(colors["accent"] if active else colors["line"]), 1))
+        painter.drawLine(QPointF(x, 12), QPointF(x, self.height()-12))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(colors["accent"] if active else colors["muted"]))
+        painter.drawRoundedRect(QRectF(x-2, self.height()/2-20, 4, 40), 2, 2)
+        painter.end()
 
 
 class ComboBox(QComboBox):
@@ -242,15 +337,22 @@ def tile(title, subtitle, price, callback, selectable=False, badge=False):
     card.setAccessibleName(title)
     card.setAccessibleDescription(f"{subtitle} {price}")
     card.setCheckable(selectable)
-    content = vbox(card, 14, 6)
+    card.setProperty("occupied", bool(selectable and badge))
+    content = vbox(card, 12 if selectable else 14, 7 if selectable else 6)
     title_label = text(title, name="TileTitle", wrap=True)
     title_label.setToolTip(title)
     title_label.setMaximumHeight(42)
     content.addWidget(title_label)
-    content.addWidget(text(subtitle, "success" if badge else "small"))
+    if selectable:
+        state = text(f"● {subtitle}" if badge else subtitle, name="TableState")
+        state.setProperty("occupied", bool(badge))
+        state.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        content.addWidget(state)
+    else:
+        content.addWidget(text(subtitle, "small"))
     content.addStretch()
     bottom = hbox(spacing=5)
-    bottom.addWidget(text(price, "" if selectable else "price"))
+    bottom.addWidget(text(price, "" if selectable else "price", name="TableAmount" if selectable else ""))
     bottom.addStretch()
     if not selectable:
         add = text("+", name="AddDot")

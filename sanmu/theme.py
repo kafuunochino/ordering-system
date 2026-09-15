@@ -21,11 +21,15 @@ PALETTES = {
     "light": dict(bg="#F2F4F7", surface="#FFFFFF", raised="#F7F8FA", line="#E5E8ED",
                   text="#202631", muted="#7C8594", faint="#A5ACB7", hover="#EDF0F4",
                   accent="#FFC938", soft="#FFF6D7", accent_text="#806000",
-                  success="#248766", success_bg="#E7F5ED", danger="#D95858", danger_bg="#FFF0F0"),
+                  success="#248766", success_bg="#E7F5ED", danger="#D95858", danger_bg="#FFF0F0",
+                  busy_bg="#CEE9DE", busy_hover="#B9DDCD", busy_selected="#BFE2D3", busy_line="#5A9F82",
+                  busy_text="#164D39", busy_badge="#236348", busy_badge_text="#FFFFFF"),
     "dark": dict(bg="#14171D", surface="#1F232B", raised="#272C35", line="#343B47",
                  text="#F1F3F7", muted="#A0A9B8", faint="#788292", hover="#313844",
                  accent="#FFD04A", soft="#3A3423", accent_text="#FFD76C",
-                 success="#63CBA3", success_bg="#223D34", danger="#FF8E8E", danger_bg="#402C31"),
+                 success="#63CBA3", success_bg="#223D34", danger="#FF8E8E", danger_bg="#402C31",
+                 busy_bg="#224A3C", busy_hover="#2C5C4B", busy_selected="#2B5847", busy_line="#4F9A7B",
+                 busy_text="#DAF9E9", busy_badge="#A9E7C9", busy_badge_text="#143F2C"),
 }
 
 
@@ -93,10 +97,19 @@ def apply_theme(application: QApplication, mode: str):
         QPushButton[variant='tile'] {{ border: 1px solid {p['line']}; background: {p['surface']}; border-radius: 11px; padding: 0; }}
         QPushButton[variant='tile']:hover {{ border-color: {p['accent']}; background: {p['raised']}; }}
         QPushButton[variant='tile']:checked {{ border: 2px solid {p['accent']}; background: {p['soft']}; }}
+        QPushButton[variant='tile'][occupied='true'] {{ background: {p['busy_bg']}; border-color: {p['busy_line']}; }}
+        QPushButton[variant='tile'][occupied='true']:hover {{ background: {p['busy_hover']}; border-color: {p['success']}; }}
+        QPushButton[variant='tile'][occupied='true']:checked {{ background: {p['busy_selected']}; border: 2px solid {p['accent']}; }}
+        QPushButton[occupied='true'] QLabel#TileTitle, QPushButton[occupied='true'] QLabel#TableAmount {{ color: {p['busy_text']}; }}
+        QLabel#TableAmount {{ font-size: 13px; font-weight: 600; }}
+        QLabel#TableState {{ background: {p['raised']}; color: {p['muted']}; border-radius: 5px; padding: 3px 6px; font-size: 11px; }}
+        QLabel#TableState[occupied='true'] {{ background: {p['busy_badge']}; color: {p['busy_badge_text']}; font-weight: 700; }}
         QLabel#TileTitle {{ font-size: 15px; font-weight: 700; }}
         QLabel#CategoryTag {{ color: {p['muted']}; font-size: 11px; }}
         QLabel#AddDot {{ background: {p['accent']}; color: #292213; border-radius: 14px; font-size: 22px; }}
         QLabel#Badge {{ background: {p['success_bg']}; color: {p['success']}; border-radius: 5px; padding: 4px 8px; font-size: 11px; }}
+        QLabel#Badge[occupied='false'] {{ background: {p['raised']}; color: {p['muted']}; }}
+        QSplitter#CashierSplitter {{ background: transparent; }}
         QFrame#CartLine {{ background: transparent; border-bottom: 1px solid {p['line']}; }}
         QLineEdit, QComboBox, QSpinBox, QDateEdit {{ background: {p['raised']}; border: 1px solid {p['line']};
             border-radius: 8px; padding: 8px 11px; min-height: 21px; selection-background-color: {p['accent']}; selection-color: #252015; }}

@@ -55,6 +55,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.order(order_id)["total_cents"], 3998)
         self.assertEqual(self.store.settings()["shop_name"], "三木测试店")
 
+    def test_cashier_widths_persist_and_invalid_layout_keeps_previous_value(self):
+        self.assertIsNone(self.store.settings()["cashier_layout"])
+        self.store.save_cashier_layout([380, 420, 432])
+        for invalid in (None, [], [300, 400], [300, 400, 0], [300, -1, 400],
+                        [300, True, 400], [300, "400", 400], [300, 400, 100001]):
+            with self.subTest(layout=invalid), self.assertRaises(ValidationError):
+                self.store.save_cashier_layout(invalid)
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.settings()["cashier_layout"], [380, 420, 432])
+
     def test_add_merge_quantity_and_remove_last_item_frees_table(self):
         order_id = self.store.add_item(1, self.product_id, "2")
         self.store.add_item(1, self.product_id)
