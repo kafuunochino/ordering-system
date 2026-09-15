@@ -17,6 +17,13 @@ class DesktopSmoke(unittest.TestCase):
             app.report_callback_exception = lambda *args: errors.append(args)
             try:
                 app.update()
+                self.assertGreater(app.winfo_height(), app.notebook.winfo_y() + app.notebook.winfo_height())
+                for geometry in ("1340x850", "1100x700"):
+                    app.geometry(geometry)
+                    app.update()
+                    self.assertTrue(app.checkout_button.winfo_ismapped())
+                    self.assertLess(app.checkout_button.winfo_rooty() + app.checkout_button.winfo_height(),
+                                    app.winfo_rooty() + app.winfo_height())
                 app.menu.selection_set(app.menu.get_children()[0])
                 app.add_item()
                 app.update()
