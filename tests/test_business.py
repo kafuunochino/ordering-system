@@ -50,7 +50,7 @@ class StoreTests(unittest.TestCase):
         self.store.close()
         self.store = Store(self.path)
         self.assertEqual(len(self.store.tables()), 15)
-        self.assertEqual(len(self.store.products()), 7)
+        self.assertEqual(len(self.store.products()), 4)
         self.assertEqual(self.store.open_order(15)["id"], order_id)
         self.assertEqual(self.store.order(order_id)["total_cents"], 3998)
         self.assertEqual(self.store.settings()["shop_name"], "三木测试店")
@@ -191,6 +191,88 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.store.history("2026-99-01")
         self.assertEqual(self.store.history("2000-01-01"), [])
+
+    def test_new_database_has_only_three_example_products(self):
+        self.assertEqual(len(self.store.products()), 3)
+
+    def test_table_rename_updates_open_order_but_keeps_paid_receipt(self):
+        order_id = self.store.add_item(1, self.product_id)
+        paid = self.checkout(order_id)
+        current_id = self.store.add_item(1, self.product_id)
+        revision = self.store.order(current_id)["revision"]
+        self.store.rename_table(1, "靠窗 A1")
+        self.assertEqual(self.store.tables()[0]["name"], "靠窗 A1")
+        self.assertEqual(self.store.order(current_id)["table_name"], "靠窗 A1")
+        self.assertGreater(self.store.order(current_id)["revision"], revision)
+        self.assertEqual(self.store.order(order_id)["receipt_text"], paid["receipt_text"])
+        self.assertEqual(self.store.order(order_id)["table_name"], "01桌")
+        with self.assertRaises(ValidationError):
+            self.store.rename_table(2, "靠窗 A1")
+        with self.assertRaises(ValidationError):
+            self.store.rename_table(1, " ")
+
+    def test_new_table_name_cannot_collide_with_a_custom_name(self):
+        self.store.rename_table(1, "09桌")
+        self.store.set_table_count("9")
+        tables = self.store.tables()
+        self.assertEqual(len(tables), 9)
+        self.assertEqual(len({t["name"] for t in tables}), 9)
+
+    def test_deleted_product_disappears_but_existing_order_remains_valid(self):
+        order_id = self.store.add_item(1, self.product_id)
+        item = self.store.order(order_id)["items"][0]
+        self.store.delete_product(self.product_id)
+        self.assertNotIn(self.product_id, {p["id"] for p in self.store.products(True)})
+        with self.assertRaises(ValidationError):
+            self.store.add_item(2, self.product_id)
+        self.store.set_quantity(order_id, item["id"], "2")
+        paid = self.checkout(order_id)
+        self.assertIn(item["product_name"], paid["receipt_text"])
+        new_id = self.store.save_product(item["product_name"], "热菜", "20")
+        self.assertNotEqual(new_id, self.product_id)
+        self.assertEqual(self.store.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_category_reuse_new_category_and_same_name_products(self):
+        first = self.store.save_product("同名餐品", "新分类", "10")
+        second = self.store.save_product("同名餐品", " 新分类 ", "12")
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.store.categories().count("新分类"), 1)
+        self.store.save_product("无分类餐品", "", "3")
+        self.assertIn("未分类", self.store.categories())
+
+    def test_restore_product_and_persist_theme(self):
+        self.store.delete_product(self.product_id)
+        self.store.restore_product(self.product_id, False)
+        self.assertNotIn(self.product_id, {p["id"] for p in self.store.products()})
+        self.assertIn(self.product_id, {p["id"] for p in self.store.products(True)})
+        self.store.set_theme("dark")
+        self.store.save_settings(self.store.settings())
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.settings()["theme"], "dark")
+        with self.assertRaises(ValidationError):
+            self.store.set_theme("invalid")
+
+    def test_v1_migration_keeps_menu_and_orders_and_creates_backup(self):
+        self.store.close()
+        old_path = Path(self.temp.name) / "legacy.sqlite3"
+        with closing(sqlite3.connect(old_path)) as legacy:
+            legacy.executescript((Path(__file__).parent / "fixtures" / "v1.sql").read_text(encoding="utf-8"))
+            legacy.execute("INSERT INTO orders(id,table_id,table_name,opened_at) VALUES (1,1,'01桌','2026-09-16 12:00:00')")
+            legacy.execute("INSERT INTO order_items(order_id,product_id,product_name,unit_cents,quantity) VALUES (1,1,'宫保鸡丁',2800,2)")
+            legacy.commit()
+        self.store = Store(old_path)
+        self.assertEqual(len(self.store.products()), 6)
+        self.assertEqual(self.store.order(1)["total_cents"], 5600)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.store.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+        backups = list(old_path.parent.glob("legacy.before-v2-*.sqlite3"))
+        self.assertEqual(len(backups), 1)
+        with closing(sqlite3.connect(backups[0])) as backup:
+            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.store.save_product("宫保鸡丁", "热菜", "30")
+        self.store.delete_product(1)
+        self.checkout(1)
 
 
 if __name__ == "__main__":

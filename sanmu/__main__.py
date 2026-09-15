@@ -4,8 +4,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import sys
-import tkinter as tk
-from tkinter import messagebox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .storage import Store
 from .ui import App
@@ -20,12 +19,9 @@ def main():
     parser = argparse.ArgumentParser(description="三木点餐系统")
     parser.add_argument("--data-dir", type=Path, default=default_data_dir(), help="指定数据目录（默认 Windows 本地应用数据目录）")
     args = parser.parse_args()
-    if sys.platform == "win32":
-        import ctypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except (AttributeError, OSError):
-            pass
+    application = QApplication([sys.argv[0]])
+    application.setApplicationName("SanmuOrdering")
+    application.setStyle("Fusion")
     try:
         data_dir = args.data_dir.expanduser().resolve()
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -36,12 +32,10 @@ def main():
         app = App(store)
     except Exception as error:
         logging.exception("启动失败")
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("三木点餐系统无法启动", f"{error}\n\n请检查数据目录权限，或使用 --data-dir 指定可写目录。", parent=root)
-        root.destroy()
+        QMessageBox.critical(None, "三木点餐系统无法启动", f"{error}\n\n请检查数据目录权限，或使用 --data-dir 指定可写目录。")
         raise SystemExit(1) from error
-    app.mainloop()
+    app.show()
+    sys.exit(application.exec())
 
 
 if __name__ == "__main__":

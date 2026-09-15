@@ -9,7 +9,7 @@ import sqlite3
 from .money import (MAX_CENTS, ValidationError, clean_text, discount_value,
                     discounted_cents, positive_int, to_cents)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def timestamp() -> str:
@@ -31,6 +31,8 @@ class Store:
             raise ValidationError("数据由较新版本创建，请使用新版三木点餐系统。")
         if version == 0:
             self._initialize()
+        elif version == 1:
+            self._migrate_v2()
 
     @contextmanager
     def transaction(self):
@@ -52,10 +54,11 @@ class Store:
             );
             CREATE TABLE products (
                 id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 category TEXT NOT NULL,
                 price_cents INTEGER NOT NULL CHECK(price_cents BETWEEN 0 AND 99999999),
-                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))
+                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+                deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0, 1))
             );
             CREATE TABLE orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,27 +89,47 @@ class Store:
                 UNIQUE(order_id, product_id, product_name, unit_cents)
             );
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            PRAGMA user_version=1;
+            PRAGMA user_version=2;
         """)
         try:
             self.db.executemany("INSERT INTO dining_tables(id,name) VALUES (?,?)",
                                 [(number, f"{number:02d}桌") for number in range(1, 9)])
             self.db.executemany("INSERT INTO products(name,category,price_cents) VALUES (?,?,?)", [
-                ("宫保鸡丁", "热菜", 2800), ("番茄炒蛋", "热菜", 1800),
-                ("清炒时蔬", "热菜", 1600), ("米饭", "主食", 200),
-                ("紫菜蛋花汤", "汤品", 1200), ("酸梅汤", "饮品", 600),
+                ("宫保鸡丁", "热菜", 2800), ("米饭", "主食", 200), ("酸梅汤", "饮品", 600),
             ])
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
             raise
 
+    def _migrate_v2(self):
+        """保留全部旧菜单和订单；迁移前生成可恢复的数据库备份。"""
+        backup_path = self.path.with_name(f"{self.path.stem}.before-v2-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3")
+        self.backup(backup_path)
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE products_v2 (
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL,
+                    price_cents INTEGER NOT NULL CHECK(price_cents BETWEEN 0 AND 99999999),
+                    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                    deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)))""")
+                self.db.execute("INSERT INTO products_v2(id,name,category,price_cents,active) "
+                                "SELECT id,name,category,price_cents,active FROM products")
+                self.db.execute("DROP TABLE products")
+                self.db.execute("ALTER TABLE products_v2 RENAME TO products")
+                if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise ValidationError("数据关联校验失败，升级已回滚，请保留备份并检查数据库。")
+                self.db.execute("PRAGMA user_version=2")
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
+
     def close(self):
         self.db.close()
 
     def settings(self) -> dict:
         defaults = {"shop_name": "三木点餐系统", "receipt_footer": "谢谢惠顾，欢迎再次光临！",
-                    "printer_name": "", "paper_width": "80", "auto_print": False}
+                    "printer_name": "", "paper_width": "80", "auto_print": False, "theme": "light"}
         for row in self.db.execute("SELECT key,value FROM settings"):
             defaults[row["key"]] = json.loads(row["value"])
         return defaults
@@ -129,6 +152,13 @@ class Store:
                     paper_width=width, auto_print=auto).items()
             ])
 
+    def set_theme(self, theme: str):
+        if theme not in ("light", "dark", "system"):
+            raise ValidationError("请选择浅色、深色或跟随系统。")
+        with self.transaction():
+            self.db.execute("INSERT INTO settings(key,value) VALUES ('theme',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(theme),))
+
     def tables(self) -> list[dict]:
         return [dict(row) for row in self.db.execute("""
             SELECT t.*, o.id AS order_id, o.opened_at,
@@ -147,25 +177,58 @@ class Store:
                                        (number,)).fetchone()
             if occupied:
                 raise ValidationError(f"{occupied['table_name']}有未结算订单，请先结算或取消后再减少桌数。")
-            self.db.executemany("INSERT OR IGNORE INTO dining_tables(id,name) VALUES (?,?)",
-                                [(index, f"{index:02d}桌") for index in range(1, number + 1)])
+            for index in range(1, number + 1):
+                if self.db.execute("SELECT id FROM dining_tables WHERE id=?", (index,)).fetchone():
+                    continue
+                name, suffix = f"{index:02d}桌", 1
+                while self.db.execute("SELECT id FROM dining_tables WHERE name=?", (name,)).fetchone():
+                    name, suffix = f"桌台{index}-{suffix}", suffix + 1
+                self.db.execute("INSERT INTO dining_tables(id,name) VALUES (?,?)", (index, name))
             self.db.execute("UPDATE dining_tables SET active=(id<=?)", (number,))
 
+    def rename_table(self, table_id: int, name: str):
+        name = clean_text(name, "桌台名称", 20)
+        try:
+            with self.transaction():
+                row = self.db.execute("SELECT name FROM dining_tables WHERE id=? AND active=1", (table_id,)).fetchone()
+                if not row:
+                    raise ValidationError("桌台不存在或已停用。")
+                if row["name"] == name:
+                    return
+                self.db.execute("UPDATE dining_tables SET name=? WHERE id=?", (name, table_id))
+                self.db.execute("UPDATE orders SET table_name=?,revision=revision+1 WHERE table_id=? AND status='open'",
+                                (name, table_id))
+        except sqlite3.IntegrityError:
+            raise ValidationError("这个桌台名称已存在，请换一个名称。") from None
+
     def products(self, include_inactive: bool = False) -> list[dict]:
-        sql = "SELECT * FROM products" + ("" if include_inactive else " WHERE active=1")
+        sql = "SELECT * FROM products WHERE deleted=0" + ("" if include_inactive else " AND active=1")
         return [dict(row) for row in self.db.execute(sql + " ORDER BY category, id")]
+
+    def categories(self) -> list[str]:
+        return [row[0] for row in self.db.execute("SELECT DISTINCT category FROM products WHERE deleted=0 ORDER BY category")]
+
+    def delete_product(self, product_id: int):
+        with self.transaction():
+            cursor = self.db.execute("UPDATE products SET deleted=1,active=0 WHERE id=? AND deleted=0", (product_id,))
+            if not cursor.rowcount:
+                raise ValidationError("餐品不存在或已删除。")
+
+    def restore_product(self, product_id: int, active: bool = True):
+        with self.transaction():
+            self.db.execute("UPDATE products SET deleted=0,active=? WHERE id=? AND deleted=1", (int(active), product_id))
 
     def save_product(self, name: str, category: str, price: str,
                      active: bool = True, product_id: int | None = None):
         name = clean_text(name, "餐品名称", 40)
-        category = clean_text(category, "分类", 20)
+        category = clean_text(category, "分类", 20, False) or "未分类"
         price_cents = to_cents(price, "单价")
         try:
             with self.transaction():
                 if product_id is None:
                     return self.db.execute("INSERT INTO products(name,category,price_cents,active) "
                                            "VALUES (?,?,?,?)", (name, category, price_cents, int(active))).lastrowid
-                cursor = self.db.execute("UPDATE products SET name=?,category=?,price_cents=?,active=? WHERE id=?",
+                cursor = self.db.execute("UPDATE products SET name=?,category=?,price_cents=?,active=? WHERE id=? AND deleted=0",
                                          (name, category, price_cents, int(active), product_id))
                 if not cursor.rowcount:
                     raise ValidationError("餐品不存在，请刷新后重试。")
@@ -197,7 +260,7 @@ class Store:
         quantity_int = positive_int(quantity, "数量")
         with self.transaction():
             table = self.db.execute("SELECT * FROM dining_tables WHERE id=? AND active=1", (table_id,)).fetchone()
-            product = self.db.execute("SELECT * FROM products WHERE id=? AND active=1", (product_id,)).fetchone()
+            product = self.db.execute("SELECT * FROM products WHERE id=? AND active=1 AND deleted=0", (product_id,)).fetchone()
             if not table or not product:
                 raise ValidationError("桌号或餐品已停用，请刷新后重试。")
             current = self.open_order(table_id)
