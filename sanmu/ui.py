@@ -6,8 +6,8 @@ import queue
 import sqlite3
 import threading
 
-from PySide6.QtCore import Qt, QTimer, QSize, QDate
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import Qt, QTimer, QSize, QDate, QUrl
+from PySide6.QtGui import QFont, QFontDatabase, QDesktopServices
 from PySide6.QtWidgets import (QApplication, QAbstractSpinBox, QButtonGroup, QDialog,
     QFileDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QSpinBox, QStackedWidget, QWidget)
@@ -132,7 +132,7 @@ class App(QMainWindow):
         self.checkout_dialog = None
         self.last_deleted = None
         self.closed = False
-        self.setWindowTitle(f"{APP_NAME} · {__version__}")
+        self.setWindowTitle(f"{APP_NAME}----by chino · {__version__}")
         self.resize(1440, 900)
         self.setMinimumSize(1080, 700)
         self.theme_preference = store.settings()["theme"]
@@ -1104,6 +1104,16 @@ class SettingsPage(QWidget):
         layout.addWidget(action("预览小票样式", self.preview_receipt))
         layout.addWidget(action("保存设置", self.save, "primary"))
         layout.addStretch()
+        layout.addWidget(divider())
+        author = hbox()
+        author.addWidget(text("作者信息", "muted"))
+        author.addStretch()
+        self.author_link = action("chino · GitHub ↗", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/kafuunochino")), "quiet")
+        self.author_link.setToolTip("https://github.com/kafuunochino")
+        self.author_link.setAccessibleName("作者 chino，打开 GitHub 主页")
+        author.addWidget(self.author_link)
+        layout.addLayout(author)
         outer.addWidget(scroll(left), 1)
         right = panel()
         layout = vbox(right, 24, 16)
