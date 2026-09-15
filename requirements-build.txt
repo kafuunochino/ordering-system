@@ -1,0 +1,2 @@
+# Only needed to package the Windows executable.
+pyinstaller==6.22.3

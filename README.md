@@ -89,7 +89,7 @@ py -3 main.py --data-dir .\data
 如果设备只支持美团云打印，不能直接使用当前的 Windows 驱动适配器。
 后续需要具体型号、接入协议及对应平台授权，再实现云打印适配器；当前没有伪造或假定云接口。
 
-打印实现参考：[Microsoft GDI 打印接口](https://learn.microsoft.com/en-us/windows/win32/printdocs/printing-and-print-spooler)。
+打印实现参考：[Microsoft GDI 打印接口](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-startdocw)。
 
 ## 打包 Windows exe
 
