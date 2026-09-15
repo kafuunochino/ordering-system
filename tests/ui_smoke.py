@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtTest import QTest
@@ -13,6 +13,10 @@ from PySide6.QtWidgets import QApplication, QDateEdit, QAbstractItemView
 
 from sanmu.storage import Store
 from sanmu.ui import App, ReceiptDialog
+from sanmu.receipt_render import ReceiptLayout, font
+from sanmu.printing import print_receipt
+from tests.receipt_cases import sample_logo, sample_receipt
+from PySide6.QtGui import QFontMetricsF
 
 
 class DesktopSmoke(unittest.TestCase):
@@ -58,7 +62,7 @@ class DesktopSmoke(unittest.TestCase):
         paid = app.store.history()[0]
         self.assertEqual(paid["final_cents"], 8501)
         receipt = ReceiptDialog(app, app.store.order(paid["id"]))
-        self.assertIn("85.01", receipt.view.toPlainText())
+        self.assertIn("85.01", receipt.receipt)
         receipt.close()
 
     def test_deletion_has_no_confirmation_and_menu_delete_can_be_undone(self):
@@ -215,6 +219,104 @@ class DesktopSmoke(unittest.TestCase):
             for widget in (report.end_date, report.query_button, report.details_button):
                 corner = widget.mapTo(self.app, QPoint(widget.width()-1, widget.height()-1))
                 self.assertTrue(self.app.rect().contains(corner))
+
+    def test_logo_upload_brand_name_theme_preview_and_removal(self):
+        settings = self.app.settings_page
+        filename = Path(self.temporary.name) / "brand.png"
+        filename.write_bytes(sample_logo())
+        self.app.navigate(5)
+        settings.shop.setText("自定义小店")
+        settings.save()
+        with patch("sanmu.ui.open_logo_file", return_value=str(filename)):
+            settings.upload_logo()
+        self.assertTrue(self.app.store.logo())
+        self.assertIsNotNone(self.app.brand_logo.image)
+        self.assertEqual(self.app.brand_name.text(), "自定义小店")
+        saved = self.app.store.logo()
+        filename.unlink()
+        for theme in (0, 1):
+            self.app.theme_combo.setCurrentIndex(theme)
+            settings.preview_receipt()
+            self.qt.processEvents()
+            dialog = settings.preview_dialog
+            self.assertEqual(dialog.view.receipt_layout.payload["logo_png"], saved)
+            self.assertEqual(dialog.view.receipt_layout.payload["style"]["shop_name"], "自定义小店")
+            self.assertNotIn("折扣", dialog.receipt)
+            self.assertGreater(dialog.view.image.height(), 0)
+            dialog.close()
+        with patch("sanmu.ui.open_logo_file", return_value=""):
+            settings.upload_logo()
+        self.assertEqual(self.app.store.logo(), saved)
+        settings.remove_logo()
+        self.assertEqual(self.app.store.logo(), b"")
+        self.assertIsNone(self.app.brand_logo.image)
+
+    def test_receipt_pixels_logo_center_and_long_item_columns_fit_both_widths(self):
+        for width in ("58", "80"):
+            payload = sample_receipt(width)
+            payload["order"]["items"].append(dict(product_name="超长中英文餐品名称ABC" * 3, quantity=1, unit_cents=99999999))
+            layout = ReceiptLayout(payload)
+            pages = layout.pages()
+            logo = next(command for command in pages[0].commands if command[0] == "image")
+            self.assertAlmostEqual(logo[1].center().x(), layout.width / 2)
+            self.assertAlmostEqual(logo[1].width() / logo[1].height(), 160 / 120)
+            image = layout.render(pages[0])
+            dark_x = [x for x in range(image.width()) if any(image.pixelColor(x, y).red() < 80
+                       for y in range(int(logo[1].top()), int(logo[1].bottom())))]
+            self.assertTrue(dark_x)
+            self.assertLessEqual(abs((min(dark_x)+max(dark_x))/2 - layout.width/2), 2)
+            for page in pages:
+                for kind, rect, value, size, align, bold in page.commands:
+                    self.assertGreaterEqual(rect.left(), 0)
+                    self.assertLessEqual(rect.right(), layout.width)
+                    self.assertLessEqual(rect.bottom(), page.height)
+                    if kind == "text":
+                        self.assertLessEqual(QFontMetricsF(font(size, bold)).horizontalAdvance(value), rect.width()+1, value)
+                        self.assertNotIn("（", value)
+                        self.assertNotIn("(", value)
+            short_pages = layout.pages(420)
+            self.assertGreater(len(short_pages), 1)
+            before = [c[2] for page in pages for c in page.commands if c[0] == "text"]
+            after = [c[2] for page in short_pages for c in page.commands if c[0] == "text"]
+            self.assertEqual(before, after)
+
+    def fake_gdi(self, fail_bitmap=False):
+        api = MagicMock()
+        api.CreateDCW.return_value = 123
+        api.GetDeviceCaps.side_effect = lambda dc, cap: {8: 640, 10: 420, 88: 203, 90: 203, 110: 670, 112: 15}.get(cap, 0)
+        api.StartDocW.return_value = 77
+        for name in ("StartPage", "EndPage", "EndDoc", "AbortDoc", "DeleteDC"):
+            getattr(api, name).return_value = 1
+        api.StretchDIBits.return_value = 0 if fail_bitmap else 1
+        return api
+
+    def test_windows_print_submits_all_bitmap_pages_with_correct_orientation(self):
+        api = self.fake_gdi()
+        with patch("sanmu.printing.ctypes.WinDLL", return_value=api):
+            job = print_receipt("测试打印机", sample_receipt())
+        self.assertEqual(job, 77)
+        self.assertGreater(api.StartPage.call_count, 1)
+        self.assertEqual(api.StartPage.call_count, api.EndPage.call_count)
+        self.assertEqual(api.StretchDIBits.call_count, api.EndPage.call_count)
+        for call in api.StretchDIBits.call_args_list:
+            args = call.args
+            header = args[10]._obj
+            self.assertLess(header.biHeight, 0)
+            self.assertEqual(header.biBitCount, 32)
+            self.assertLessEqual(args[1]+args[3], 640)
+            self.assertLessEqual(args[4], 420)
+            self.assertEqual(len(bytes(args[9]))-1, header.biSizeImage)
+        api.EndDoc.assert_called_once()
+        api.DeleteDC.assert_called_once()
+        api.AbortDoc.assert_not_called()
+
+    def test_windows_print_failure_aborts_job_and_releases_device(self):
+        api = self.fake_gdi(True)
+        with patch("sanmu.printing.ctypes.WinDLL", return_value=api), self.assertRaises(OSError):
+            print_receipt("测试打印机", sample_receipt())
+        api.AbortDoc.assert_called_once()
+        api.EndDoc.assert_not_called()
+        api.DeleteDC.assert_called_once()
 
 
 if __name__ == "__main__":

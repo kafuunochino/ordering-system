@@ -4,13 +4,14 @@ from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 import json
+import hashlib
 import sqlite3
 
 from .money import (MAX_CENTS, ValidationError, clean_text, discount_value,
                     discounted_cents, positive_int, to_cents)
 from .reports import date_bounds
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def timestamp() -> str:
@@ -34,6 +35,8 @@ class Store:
             self._initialize()
         elif version == 1:
             self._migrate_v2()
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 2:
+            self._migrate_v3()
 
     @contextmanager
     def transaction(self):
@@ -75,6 +78,7 @@ class Store:
                 final_cents INTEGER,
                 note TEXT NOT NULL DEFAULT '',
                 receipt_text TEXT,
+                receipt_style TEXT,
                 print_status TEXT NOT NULL DEFAULT '未打印',
                 print_error TEXT NOT NULL DEFAULT ''
             );
@@ -90,7 +94,8 @@ class Store:
                 UNIQUE(order_id, product_id, product_name, unit_cents)
             );
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            PRAGMA user_version=2;
+            CREATE TABLE branding_assets (id TEXT PRIMARY KEY, png BLOB NOT NULL);
+            PRAGMA user_version=3;
         """)
         try:
             self.db.executemany("INSERT INTO dining_tables(id,name) VALUES (?,?)",
@@ -125,12 +130,20 @@ class Store:
         finally:
             self.db.execute("PRAGMA foreign_keys=ON")
 
+    def _migrate_v3(self):
+        backup_path = self.path.with_name(f"{self.path.stem}.before-v3-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3")
+        self.backup(backup_path)
+        with self.transaction():
+            self.db.execute("ALTER TABLE orders ADD COLUMN receipt_style TEXT")
+            self.db.execute("CREATE TABLE branding_assets (id TEXT PRIMARY KEY, png BLOB NOT NULL)")
+            self.db.execute("PRAGMA user_version=3")
+
     def close(self):
         self.db.close()
 
     def settings(self) -> dict:
         defaults = {"shop_name": "三木点餐系统", "receipt_footer": "谢谢惠顾，欢迎再次光临！",
-                    "printer_name": "", "paper_width": "80", "auto_print": False, "theme": "light"}
+                    "printer_name": "", "paper_width": "80", "auto_print": False, "theme": "light", "logo_id": ""}
         for row in self.db.execute("SELECT key,value FROM settings"):
             defaults[row["key"]] = json.loads(row["value"])
         return defaults
@@ -159,6 +172,45 @@ class Store:
         with self.transaction():
             self.db.execute("INSERT INTO settings(key,value) VALUES ('theme',?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(theme),))
+
+    def save_logo(self, png: bytes):
+        from .branding import logo_image
+        if not isinstance(png, bytes) or len(png) > 2 * 1024 * 1024:
+            raise ValidationError("Logo 图片数据无效或过大。")
+        image = logo_image(png)
+        if max(image.width(), image.height()) > 512:
+            raise ValidationError("请通过上传功能导入 Logo。")
+        asset_id = hashlib.sha256(png).hexdigest()
+        with self.transaction():
+            self.db.execute("INSERT OR IGNORE INTO branding_assets(id,png) VALUES (?,?)", (asset_id, png))
+            self.db.execute("INSERT INTO settings(key,value) VALUES ('logo_id',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(asset_id),))
+        return asset_id
+
+    def remove_logo(self):
+        # 历史小票仍引用旧资源，清除当前设置时不删除图片。
+        with self.transaction():
+            self.db.execute("INSERT INTO settings(key,value) VALUES ('logo_id','\"\"') "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+
+    def logo(self, asset_id: str | None = None) -> bytes:
+        asset_id = self.settings()["logo_id"] if asset_id is None else asset_id
+        if not asset_id:
+            return b""
+        row = self.db.execute("SELECT png FROM branding_assets WHERE id=?", (asset_id,)).fetchone()
+        if row is None:
+            raise ValidationError("Logo 资源不存在，请检查数据库备份。")
+        return bytes(row["png"])
+
+    def receipt(self, order_id: int) -> dict:
+        """返回不依赖数据库连接的打印数据，预览和后台打印共用。"""
+        from .receipts import legacy_receipt_style
+        order = self.order(order_id)
+        if order["status"] != "paid":
+            raise ValidationError("只有已结算订单可以打印结算小票。")
+        style = json.loads(order["receipt_style"]) if order["receipt_style"] else legacy_receipt_style(
+            order["receipt_text"], self.settings())
+        return dict(order=order, style=style, logo_png=self.logo(style.get("logo_id", "")))
 
     def tables(self) -> list[dict]:
         return [dict(row) for row in self.db.execute("""
@@ -317,7 +369,7 @@ class Store:
 
     def checkout(self, order_id: int, base: str, discount: str, note: str,
                  expected_revision: int) -> dict:
-        from .printing import format_receipt
+        from .receipts import format_receipt, receipt_style
 
         base_cents = to_cents(base, "结算金额")
         discount_text = format(discount_value(discount).normalize(), "f")
@@ -334,9 +386,12 @@ class Store:
                 discount=?,final_cents=?,note=?,revision=revision+1 WHERE id=?""",
                 (closed, order["total_cents"], base_cents, discount_text, final_cents, note, order_id))
             paid = self.order(order_id)
-            receipt = format_receipt(paid, self.settings())
-            self.db.execute("UPDATE orders SET receipt_text=? WHERE id=?", (receipt, order_id))
+            style = receipt_style(self.settings())
+            receipt = format_receipt(paid, style)
+            style_json = json.dumps(style, ensure_ascii=False)
+            self.db.execute("UPDATE orders SET receipt_text=?,receipt_style=? WHERE id=?", (receipt, style_json, order_id))
             paid["receipt_text"] = receipt
+            paid["receipt_style"] = style_json
             return paid
 
     def history(self, date: str = "", status: str = "all", end_date: str = "") -> list[dict]:

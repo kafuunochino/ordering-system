@@ -83,8 +83,8 @@ class StoreTests(unittest.TestCase):
         order = self.checkout(order_id, "100.01", "8.5")
         self.assertEqual(order["final_cents"], 8501)
         self.assertEqual(order["base_cents"], 10001)
-        self.assertIn("最终实收：￥85.01", order["receipt_text"])
-        self.assertIn("折扣：8.5 折", order["receipt_text"])
+        self.assertRegex(order["receipt_text"], r"最终实收：\s*￥85\.01")
+        self.assertRegex(order["receipt_text"], r"折扣：\s*8\.5 折")
         self.assertIsNone(self.store.open_order(2))
         self.assertNotEqual(self.store.add_item(2, self.product_id), order_id)
         self.assertEqual(self.store.today_summary(), {"count": 1, "total_cents": 8501})
@@ -95,7 +95,7 @@ class StoreTests(unittest.TestCase):
         self.store.save_product("新菜名", "新品", "50", product_id=self.product_id)
         self.store.save_settings(dict(shop_name="新店名", receipt_footer="新页脚", printer_name="", paper_width="58"))
         self.assertEqual(self.store.order(order_id)["receipt_text"], receipt)
-        self.assertIn("折扣：10 折", receipt)
+        self.assertNotIn("折扣：", receipt)
 
     def test_double_checkout_and_changes_to_paid_order_are_rejected(self):
         order_id = self.store.add_item(1, self.product_id)
@@ -264,7 +264,7 @@ class StoreTests(unittest.TestCase):
         self.store = Store(old_path)
         self.assertEqual(len(self.store.products()), 6)
         self.assertEqual(self.store.order(1)["total_cents"], 5600)
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(self.store.db.execute("PRAGMA foreign_key_check").fetchall(), [])
         backups = list(old_path.parent.glob("legacy.before-v2-*.sqlite3"))
         self.assertEqual(len(backups), 1)

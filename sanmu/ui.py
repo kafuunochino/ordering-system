@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (QApplication, QAbstractSpinBox, QButtonGroup, QDi
 from . import APP_NAME, __version__
 from .money import ValidationError, discounted_cents, money, to_cents
 from .printing import available_printers, print_receipt
+from .branding import import_logo
+from .receipts import format_receipt, receipt_style
+from .receipt_widgets import LogoBadge, ReceiptPreview
 from .storage import Store
 from .report_ui import RevenuePage
 from .theme import apply_theme, apply_window_theme
@@ -75,6 +78,17 @@ def input_field(placeholder="", value=""):
     widget.setPlaceholderText(placeholder)
     widget.setClearButtonEnabled(True)
     return widget
+
+
+def open_logo_file(parent):
+    dialog = QFileDialog(parent, "上传店铺 Logo")
+    dialog.setOption(QFileDialog.DontUseNativeDialog)
+    dialog.setFileMode(QFileDialog.ExistingFile)
+    dialog.setNameFilter("Logo 图片 (*.png *.jpg *.jpeg *.bmp *.webp)")
+    apply_window_theme(dialog)
+    filename = dialog.selectedFiles()[0] if dialog.exec() == QDialog.Accepted else ""
+    dialog.deleteLater()
+    return filename
 
 
 def field(layout, title, widget):
@@ -138,13 +152,16 @@ class App(QMainWindow):
         rail = panel("Rail")
         rail.setFixedWidth(144)
         rail_layout = vbox(rail, 14, 9)
-        logo = text("木", name="Logo")
-        logo.setFixedSize(46, 46)
-        logo.setAlignment(Qt.AlignCenter)
-        rail_layout.addWidget(logo, alignment=Qt.AlignHCenter)
-        brand = text("三木点餐", name="RailBrand")
-        brand.setAlignment(Qt.AlignCenter)
-        rail_layout.addWidget(brand)
+        branding = hbox(spacing=8)
+        self.brand_logo = LogoBadge()
+        branding.addWidget(self.brand_logo)
+        store_name = self.store.settings()["shop_name"]
+        self.brand_name = text(store_name, name="RailBrand", wrap=True)
+        self.brand_name.setFixedWidth(70)
+        self.brand_name.setMaximumHeight(44)
+        self.brand_name.setToolTip(store_name)
+        branding.addWidget(self.brand_name)
+        rail_layout.addLayout(branding)
         rail_layout.addSpacing(27)
         self.nav_buttons = []
         self.nav_group = QButtonGroup(self)
@@ -368,6 +385,16 @@ class App(QMainWindow):
         summary = self.store.today_summary()
         self.summary.setText(f"今日实收  ￥{money(summary['total_cents'])}   ·   {summary['count']} 单")
         self.shop_label.setText(self.store.settings()["shop_name"])
+        self.refresh_branding()
+
+    def refresh_branding(self):
+        name = self.store.settings()["shop_name"]
+        self.brand_name.setText(name)
+        self.brand_name.setToolTip(name)
+        logo = self.store.logo()
+        self.brand_logo.set_logo(logo)
+        self.settings_page.logo_preview.set_logo(logo)
+        self.settings_page.remove_logo_button.setEnabled(bool(logo))
 
     def filter_tables(self, value):
         self.table_filter = value
@@ -551,11 +578,14 @@ class App(QMainWindow):
         if order["id"] in self.printing_ids:
             self.status.setText("该账单正在提交打印，请稍候")
             return
+        payload = self.run_action(lambda: self.store.receipt(order["id"]))
+        if payload is None:
+            return
         self.printing_ids.add(order["id"])
         self.status.setText(f"SM{order['id']:08d} · 正在提交打印…")
         def worker():
             try:
-                job = print_receipt(printer, order["receipt_text"], f"三木结算单 SM{order['id']:08d}")
+                job = print_receipt(printer, payload, f"三木结算单 SM{order['id']:08d}")
                 self.print_queue.put((order["id"], "", job))
             except Exception as error:
                 logging.exception("打印失败")
@@ -990,19 +1020,25 @@ class HistoryPage(QWidget):
 
 
 class ReceiptDialog(ThemedDialog):
-    def __init__(self, app, order):
+    def __init__(self, app, order, payload=None, sample=False):
         super().__init__(app)
-        self.setWindowTitle(f"SM{order['id']:08d} · 订单详情")
+        self.setWindowTitle("小票样式预览" if sample else f"SM{order['id']:08d} · 订单详情")
         self.resize(590, 740)
         self.setMinimumSize(460, 520)
         layout = vbox(self, 24, 16)
-        layout.addWidget(text("结算小票" if order["status"] == "paid" else "取消记录", "heading"))
+        layout.addWidget(text("小票样式预览" if sample else "结算小票" if order["status"] == "paid" else "取消记录", "heading"))
+        if sample:
+            layout.addWidget(text("示例账单，仅用于核对打印样式", "small"))
         paid = order["status"] == "paid"
-        self.receipt = order["receipt_text"] if paid else (
-            f"已取消订单 SM{order['id']:08d}\n桌台：{order['table_name']}\n取消时间：{order['closed_at']}\n\n" +
-            "\n".join(f"{item['product_name']} × {item['quantity']}  ￥{money(item['unit_cents'] * item['quantity'])}" for item in order["items"]))
-        self.view = QPlainTextEdit(self.receipt)
-        self.view.setReadOnly(True)
+        if paid:
+            payload = payload or app.store.receipt(order["id"])
+            self.receipt = format_receipt(payload["order"], payload["style"])
+            self.view = ReceiptPreview(payload)
+        else:
+            self.receipt = (f"已取消订单 SM{order['id']:08d}\n桌台：{order['table_name']}\n取消时间：{order['closed_at']}\n\n" +
+                "\n".join(f"{item['product_name']} × {item['quantity']}  ￥{money(item['unit_cents'] * item['quantity'])}" for item in order["items"]))
+            self.view = QPlainTextEdit(self.receipt)
+            self.view.setReadOnly(True)
         layout.addWidget(self.view, 1)
         row = hbox()
         def export():
@@ -1012,7 +1048,7 @@ class ReceiptDialog(ThemedDialog):
         row.addWidget(action("导出文本", export))
         row.addStretch()
         row.addWidget(action("关闭", self.reject))
-        if paid:
+        if paid and not sample:
             row.addWidget(action("打印 / 补打", lambda: app.enqueue_print(order), "primary"))
         layout.addLayout(row)
 
@@ -1033,7 +1069,7 @@ class SettingsPage(QWidget):
         self.shop.setMaxLength(40)
         self.footer = input_field(value=settings["receipt_footer"])
         self.footer.setMaxLength(80)
-        field(layout, "小票店名", self.shop)
+        field(layout, "店铺名称", self.shop)
         field(layout, "小票页脚", self.footer)
         layout.addWidget(text("Windows 打印机", "muted"))
         row = hbox()
@@ -1050,12 +1086,24 @@ class SettingsPage(QWidget):
         self.auto = QCheckBox("结算时默认勾选打印小票")
         self.auto.setChecked(settings["auto_print"])
         layout.addWidget(self.auto)
+        layout.addWidget(action("预览小票样式", self.preview_receipt))
         layout.addWidget(action("保存设置", self.save, "primary"))
         layout.addStretch()
-        outer.addWidget(left, 1)
+        outer.addWidget(scroll(left), 1)
         right = panel()
         layout = vbox(right, 24, 16)
-        layout.addWidget(text("打印与数据", "heading"))
+        layout.addWidget(text("店铺 Logo", "heading"))
+        branding = hbox(spacing=16)
+        self.logo_preview = LogoBadge(76)
+        branding.addWidget(self.logo_preview)
+        controls = vbox(spacing=8)
+        controls.addWidget(action("上传 Logo", self.upload_logo, "primary"))
+        self.remove_logo_button = action("移除 Logo", self.remove_logo)
+        controls.addWidget(self.remove_logo_button)
+        branding.addLayout(controls, 1)
+        layout.addLayout(branding)
+        layout.addWidget(text("支持 PNG、JPG、BMP、WebP，最大 10 MB。上传后立即保存，显示在软件左上角及小票顶部。", "small", wrap=True))
+        layout.addWidget(divider())
         layout.addWidget(text("美团打印机", "heading"))
         layout.addWidget(text("支持提供 Windows 驱动的机型。安装对应驱动后，先在 Windows 打印测试页，再回到这里选择设备。\n\n纸张尺寸和切纸由驱动设置。仅支持美团云打印的设备仍需按具体型号接入。",
                               "muted", wrap=True))
@@ -1069,7 +1117,38 @@ class SettingsPage(QWidget):
         layout.addWidget(text("桌台、餐品、未结算订单和历史账单自动保存。建议定期备份到另一块磁盘。", "muted", wrap=True))
         layout.addStretch()
         layout.addWidget(text("外观可在右上角切换：浅色、深色或跟随系统。", "small", wrap=True))
-        outer.addWidget(right, 1)
+        outer.addWidget(scroll(right), 1)
+
+    def upload_logo(self):
+        filename = open_logo_file(self)
+        if filename:
+            def save():
+                self.app.store.save_logo(import_logo(filename))
+                self.app.refresh_branding()
+                self.app.status.setText("● 店铺 Logo 已保存")
+            self.app.run_action(save)
+
+    def remove_logo(self):
+        def remove():
+            self.app.store.remove_logo()
+            self.app.refresh_branding()
+            self.app.status.setText("● 已移除当前店铺 Logo")
+        self.app.run_action(remove)
+
+    def preview_receipt(self):
+        def preview():
+            settings = dict(self.app.store.settings(), shop_name=self.shop.text(), receipt_footer=self.footer.text(),
+                            paper_width=self.width.currentText())
+            products = self.app.store.products()[:3]
+            items = [dict(product_name=product["name"], unit_cents=product["price_cents"], quantity=1) for product in products]
+            total = sum(item["unit_cents"] for item in items)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            order = dict(id=0, status="paid", table_name="示例桌台", opened_at=now, closed_at=now, items=items,
+                         subtotal_cents=total, base_cents=total, discount="10", final_cents=total, note="")
+            payload = dict(order=order, style=receipt_style(settings), logo_png=self.app.store.logo())
+            self.preview_dialog = ReceiptDialog(self.app, order, payload, sample=True)
+            self.preview_dialog.open()
+        self.app.run_action(preview)
 
     def load_printers(self):
         def load():
