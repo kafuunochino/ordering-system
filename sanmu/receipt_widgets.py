@@ -27,15 +27,16 @@ class LogoBadge(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        palette = PALETTES[QApplication.instance().property("sanmuTheme") or "light"]
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.white if self.image is not None else palette["accent"])
-        painter.drawRoundedRect(QRectF(self.rect()), 8, 8)
         if self.image is not None:
+            # 保留图片透明度，让透明区域直接透出所在界面的背景。
             size = self.image.size().scaled(self.size()-self.size()/5, Qt.KeepAspectRatio)
             painter.drawImage(QRectF((self.width()-size.width())/2, (self.height()-size.height())/2,
                                      size.width(), size.height()), self.image)
         else:
+            palette = PALETTES[QApplication.instance().property("sanmuTheme") or "light"]
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(palette["accent"])
+            painter.drawRoundedRect(QRectF(self.rect()), 8, 8)
             painter.setPen(palette["text"] if palette is PALETTES["light"] else "#292213")
             letter = QFont("Microsoft YaHei")
             letter.setPixelSize(round(self.height() * .48))
