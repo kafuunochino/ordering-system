@@ -152,14 +152,17 @@ py -3 -m venv .venv
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name SanmuOrdering main.py
+.\.venv\Scripts\python.exe build_exe.py
 ```
 
 输出文件为 `dist\SanmuOrdering.exe`。目标电脑无需另外安装 Python。
 打包依赖单独固定在 `requirements-build.txt`，其中包含源码界面所需依赖。
+项目根目录的 `icon.png` 同时用于程序窗口、任务栏及 exe 文件图标；打包时由 Pillow 自动转换为 Windows 图标并嵌入，原 PNG 也会随程序打包。单独复制 exe 即可显示图标。
+更换根目录 `icon.png` 后，源码运行重启即可生效；exe 需要重新打包。深浅主题均保留原图配色。
+`build_exe.py` 在打包进程内优先查找 Windows 系统依赖，避免误带入其他软件放在 PATH 中的同名 DLL。
 版本更新时替换程序即可；默认数据库独立保存。发布前应在目标电脑完成打印及收银验收。
 
-打包依据：[PyInstaller 官方文档](https://www.pyinstaller.org/en/stable/)。
+打包依据：[PyInstaller 图标及资源参数](https://pyinstaller.org/en/stable/usage.html)、[运行时资源路径](https://pyinstaller.org/en/stable/runtime-information.html)。
 
 ## 测试
 
@@ -219,6 +222,7 @@ Logo 持久化及备份、图片验证、旧版数据库升级、58 / 80 毫米�
 
 ```text
 main.py                 源码入口
+icon.png                窗口、任务栏及 exe 图标原图
 sanmu/
   ui.py                 Qt 页面、结算确认、打印任务管理
   report_ui.py          收入统计页面、日期筛选及账单跳转
@@ -237,6 +241,7 @@ tests/                  业务测试与桌面集成检查
 docs/requirements.md    本期需求与验收范围
 start.bat               源码启动
 build.bat               Windows exe 打包
+build_exe.py            图标、资源与 Windows 依赖查找配置
 ```
 
-公开仓库只存放源码、测试和文档；数据库、日志、虚拟环境与打包输出均已配置 Git 忽略。
+公开仓库只存放源码、图标、测试和文档；数据库、日志、虚拟环境与打包输出均已配置 Git 忽略。

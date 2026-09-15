@@ -1,3 +1,5 @@
 # Only needed to package the Windows executable.
 -r requirements.txt
 pyinstaller==6.22.3
+# PyInstaller converts the root PNG to a multi-size Windows ICO resource.
+pillow==12.3.0
