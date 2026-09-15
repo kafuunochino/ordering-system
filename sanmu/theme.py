@@ -31,6 +31,7 @@ PALETTES = {
 
 def apply_theme(application: QApplication, mode: str):
     p = PALETTES[mode]
+    application.setProperty("sanmuTheme", mode)
     palette = QPalette()
     for role, value in {
         QPalette.Window: p["bg"], QPalette.WindowText: p["text"], QPalette.Base: p["surface"],
@@ -55,10 +56,13 @@ def apply_theme(application: QApplication, mode: str):
         QLabel[role='title'] {{ font-size: 24px; font-weight: 700; }}
         QLabel[role='amount'] {{ font-size: 34px; font-weight: 700; }}
         QLabel[role='price'] {{ font-size: 21px; font-weight: 700; }}
+        QLabel[role='metric'] {{ font-size: 26px; font-weight: 700; }}
         QLabel[role='error'] {{ color: {p['danger']}; }}
         QLabel[role='success'] {{ color: {p['success']}; }}
         QFrame#Panel {{ background: {p['surface']}; border: 1px solid {p['line']}; border-radius: 14px; }}
         QFrame#SubPanel {{ background: {p['raised']}; border: none; border-radius: 10px; }}
+        QFrame#RevenuePrimary {{ background: {p['soft']}; border: 1px solid {p['accent']}; border-radius: 14px; }}
+        QFrame#RevenuePrimary QLabel[role='metric'] {{ color: {p['accent_text']}; }}
         QFrame#Header {{ background: {p['surface']}; border-bottom: 1px solid {p['line']}; }}
         QFrame#Rail {{ background: #191D25; border: none; }}
         QLabel#Logo {{ background: {p['accent']}; color: #282219; font-size: 20px; font-weight: 900; border-radius: 11px; }}
@@ -94,9 +98,21 @@ def apply_theme(application: QApplication, mode: str):
         QLabel#AddDot {{ background: {p['accent']}; color: #292213; border-radius: 14px; font-size: 22px; }}
         QLabel#Badge {{ background: {p['success_bg']}; color: {p['success']}; border-radius: 5px; padding: 4px 8px; font-size: 11px; }}
         QFrame#CartLine {{ background: transparent; border-bottom: 1px solid {p['line']}; }}
-        QLineEdit, QComboBox, QSpinBox {{ background: {p['raised']}; border: 1px solid {p['line']};
+        QLineEdit, QComboBox, QSpinBox, QDateEdit {{ background: {p['raised']}; border: 1px solid {p['line']};
             border-radius: 8px; padding: 8px 11px; min-height: 21px; selection-background-color: {p['accent']}; selection-color: #252015; }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {p['accent']}; }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus {{ border: 1px solid {p['accent']}; }}
+        QDateEdit:disabled {{ color: {p['faint']}; }}
+        QDateEdit::drop-down {{ border: none; width: 34px; }}
+        QDateEdit::down-arrow {{ image: none; }}
+        QDateEdit {{ padding-right: 30px; }}
+        QCalendarWidget {{ background: {p['surface']}; border: 1px solid {p['line']}; }}
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{ background: {p['raised']}; }}
+        QCalendarWidget QAbstractItemView {{ background: {p['surface']}; color: {p['text']};
+            alternate-background-color: {p['raised']}; selection-background-color: {p['accent']}; selection-color: #252015; outline: 0; }}
+        QCalendarWidget QToolButton {{ background: transparent; color: {p['text']}; border: none;
+            border-radius: 5px; padding: 8px; }}
+        QCalendarWidget QToolButton:hover {{ background: {p['hover']}; }}
+        QCalendarWidget QSpinBox {{ padding: 3px; min-width: 70px; }}
         QComboBox::drop-down {{ border: none; width: 26px; }}
         QComboBox::down-arrow {{ image: none; }}
         QComboBox {{ padding-right: 28px; }}

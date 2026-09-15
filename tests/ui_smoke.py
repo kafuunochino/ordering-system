@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDateEdit, QAbstractItemView
 
 from sanmu.storage import Store
 from sanmu.ui import App, ReceiptDialog
@@ -110,11 +110,111 @@ class DesktopSmoke(unittest.TestCase):
         tables.rename()
         self.assertEqual(app.cart_title.text(), "靠窗 A1")
         self.assertEqual(app.table_grid.cards[0].findChildren(type(app.cart_title))[0].text(), "靠窗 A1")
-        app.history_page.date.setText("unfinished date")
+        app.history_page.date.setDate(QDate(2024, 2, 29))
         app.refresh()
-        for page in range(5):
+        for page in range(app.stack.count()):
             app.navigate(page)
             self.qt.processEvents()
+
+    def make_report_order(self, timestamp, status="paid", base="100.01", discount="8.5"):
+        with patch("sanmu.storage.timestamp", return_value=timestamp):
+            order_id = self.app.store.add_item(1, self.app.store.products()[0]["id"])
+            if status == "paid":
+                self.app.store.checkout(order_id, base, discount, "", self.app.store.order(order_id)["revision"])
+            else:
+                self.app.store.cancel_order(order_id)
+        return order_id
+
+    def test_history_status_calendar_and_combined_range(self):
+        self.make_report_order("2024-02-28 12:00:00")
+        self.make_report_order("2024-02-29 23:59:59", "cancelled")
+        self.make_report_order("2024-03-01 00:00:00")
+        page = self.app.history_page
+        self.app.navigate(3)
+        self.assertIsInstance(page.date, QDateEdit)
+        self.assertTrue(page.date.calendarPopup())
+        page.set_filters("2024-02-28", "2024-02-29")
+        self.assertEqual(page.view.rowCount(), 2)
+        page.status_combo.setCurrentIndex(page.status_combo.findData("paid"))
+        self.assertEqual(page.view.rowCount(), 1)
+        self.assertEqual(page.view.item(0, 3).text(), "已结算")
+        page.status_combo.setCurrentIndex(page.status_combo.findData("cancelled"))
+        self.assertEqual(page.view.item(0, 3).text(), "已取消")
+        page.date_mode.setCurrentIndex(page.date_mode.findData("day"))
+        self.assertEqual(page.view.rowCount(), 0)
+        page.date.setDate(QDate(2024, 2, 29))
+        self.assertEqual(page.view.rowCount(), 1)
+        page.show_all()
+        self.assertEqual(page.status_combo.currentData(), "all")
+        self.assertEqual(page.view.rowCount(), 3)
+        self.assertFalse(page.date.isVisible())
+
+    def test_revenue_modes_totals_drilldown_and_new_checkout_refresh(self):
+        self.make_report_order("2024-02-28 12:00:00")
+        self.make_report_order("2024-02-29 23:59:59", base="10", discount="10")
+        self.make_report_order("2024-03-01 00:00:00", "cancelled")
+        page = self.app.revenue_page
+        self.app.navigate(4)
+        page.mode.setCurrentIndex(page.mode.findData("month"))
+        page.year.setCurrentText("2024 年")
+        page.month.setCurrentIndex(1)
+        self.assertEqual(page.metrics["total_cents"].text(), "￥95.01")
+        self.assertEqual(page.metrics["count"].text(), "2 单")
+        self.assertEqual(page.view.rowCount(), 2)
+        page.mode.setCurrentIndex(page.mode.findData("year"))
+        self.assertEqual(page.view.rowCount(), 1)
+        page.view.selectRow(0)
+        page.show_orders()
+        history = self.app.history_page
+        self.assertIs(self.app.stack.currentWidget(), history)
+        self.assertEqual(history.view.rowCount(), 2)
+        self.assertEqual(history.end_date.date(), QDate(2024, 2, 29))
+        self.assertEqual(history.status_combo.currentData(), "paid")
+        self.app.navigate(4)
+        page.mode.setCurrentIndex(page.mode.findData("range"))
+        page.date.setDate(QDate(2024, 2, 28))
+        page.end_date.setDate(QDate(2024, 2, 29))
+        self.assertEqual(page.metrics["total_cents"].text(), "￥95.01")
+        self.make_report_order("2024-02-29 23:59:59", base="5", discount="10")
+        self.app.refresh()
+        self.assertEqual(page.metrics["total_cents"].text(), "￥100.01")
+        page.mode.setCurrentIndex(page.mode.findData("day"))
+        self.assertEqual(page.metrics["total_cents"].text(), "￥85.01")
+        page.mode.setCurrentIndex(page.mode.findData("today"))
+        today = QDate.currentDate().toString("yyyy-MM-dd")
+        self.assertEqual(page.report["start_date"], today)
+        self.assertFalse(page.date.isEnabled())
+
+    def test_calendar_popup_selection_themes_and_report_minimum_size(self):
+        page = self.app.history_page
+        for theme in (0, 1):
+            self.app.theme_combo.setCurrentIndex(theme)
+            self.app.navigate(3)
+            page.set_filters("2024-02-28", "2024-02-28")
+            self.app.resize(1100, 700)
+            QTest.qWait(20)
+            QTest.mouseClick(page.date, Qt.LeftButton, pos=QPoint(page.date.width()-16, page.date.height()//2))
+            QTest.qWait(20)
+            calendar = page.date.calendarWidget()
+            self.assertTrue(calendar.isVisible())
+            calendar_view = calendar.findChild(QAbstractItemView)
+            QTest.keyClick(calendar_view, Qt.Key_Right)
+            QTest.keyClick(calendar_view, Qt.Key_Return)
+            QTest.qWait(20)
+            self.assertEqual(page.date.date(), QDate(2024, 2, 29))
+            self.assertFalse(calendar.isVisible())
+            page.date_mode.setCurrentIndex(page.date_mode.findData("range"))
+            for widget in (page.end_date, page.status_combo):
+                corner = widget.mapTo(self.app, QPoint(widget.width()-1, widget.height()-1))
+                self.assertTrue(self.app.rect().contains(corner))
+            self.app.navigate(4)
+            report = self.app.revenue_page
+            report.mode.setCurrentIndex(report.mode.findData("range"))
+            QTest.qWait(20)
+            self.assertLessEqual(self.app.width(), 1100)
+            for widget in (report.end_date, report.query_button, report.details_button):
+                corner = widget.mapTo(self.app, QPoint(widget.width()-1, widget.height()-1))
+                self.assertTrue(self.app.rect().contains(corner))
 
 
 if __name__ == "__main__":

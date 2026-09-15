@@ -6,7 +6,7 @@ import queue
 import sqlite3
 import threading
 
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QDate
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QAbstractSpinBox, QButtonGroup, QDialog,
     QFileDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
@@ -16,9 +16,10 @@ from . import APP_NAME, __version__
 from .money import ValidationError, discounted_cents, money, to_cents
 from .printing import available_printers, print_receipt
 from .storage import Store
+from .report_ui import RevenuePage
 from .theme import apply_theme, apply_window_theme
 from .widgets import ComboBox as QComboBox, CheckBox as QCheckBox
-from .widgets import (CardGrid, action, clear_layout, data_table, divider, fill_table,
+from .widgets import (CardGrid, DateEdit, action, clear_layout, data_table, divider, fill_table,
     hbox, line_icon, panel, scroll, selected_id, text, tile, vbox)
 
 
@@ -148,7 +149,7 @@ class App(QMainWindow):
         self.nav_buttons = []
         self.nav_group = QButtonGroup(self)
         for index, (name, icon) in enumerate((("点餐收银", "tables"), ("餐品管理", "menu"),
-                ("桌台管理", "desk"), ("历史订单", "history"), ("系统设置", "settings"))):
+                ("桌台管理", "desk"), ("历史订单", "history"), ("收入统计", "revenue"), ("系统设置", "settings"))):
             btn = action(name, lambda i=index: self.navigate(i), "nav")
             btn.setCheckable(True)
             btn.setIconSize(QSize(19, 19))
@@ -186,8 +187,9 @@ class App(QMainWindow):
         self.products_page = ProductsPage(self)
         self.tables_page = TablesPage(self)
         self.history_page = HistoryPage(self)
+        self.revenue_page = RevenuePage(self)
         self.settings_page = SettingsPage(self)
-        for page in (self.order_page, self.products_page, self.tables_page, self.history_page, self.settings_page):
+        for page in (self.order_page, self.products_page, self.tables_page, self.history_page, self.revenue_page, self.settings_page):
             self.stack.addWidget(page)
         footer = QWidget()
         footer.setFixedHeight(39)
@@ -312,9 +314,11 @@ class App(QMainWindow):
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
-        self.page_title.setText(["点餐收银", "餐品管理", "桌台管理", "历史订单", "系统设置"][index])
+        self.page_title.setText(["点餐收银", "餐品管理", "桌台管理", "历史订单", "收入统计", "系统设置"][index])
         self.nav_buttons[index][0].setChecked(True)
         self._nav_icons()
+        if self.stack.currentWidget() in (self.history_page, self.revenue_page):
+            self.run_action(self.stack.currentWidget().refresh)
 
     def _nav_icons(self):
         for button, icon in self.nav_buttons:
@@ -360,6 +364,7 @@ class App(QMainWindow):
         self.products_page.refresh()
         self.tables_page.refresh()
         self.history_page.refresh()
+        self.revenue_page.refresh()
         summary = self.store.today_summary()
         self.summary.setText(f"今日实收  ￥{money(summary['total_cents'])}   ·   {summary['count']} 单")
         self.shop_label.setText(self.store.settings()["shop_name"])
@@ -876,41 +881,104 @@ class HistoryPage(QWidget):
         top = hbox()
         top.addWidget(text("历史账单", "heading"))
         top.addStretch()
-        self.date = input_field("YYYY-MM-DD", datetime.now().strftime("%Y-%m-%d"))
-        self.date.setFixedWidth(170)
-        self.filter_date = self.date.text()
-        top.addWidget(self.date)
-        top.addWidget(action("查询", lambda: app.run_action(self.search)))
-        top.addWidget(action("全部记录", self.show_all))
+        top.addWidget(text("订单状态", "muted"))
+        self.status_combo = QComboBox()
+        for title, key in (("全部状态", "all"), ("已结算", "paid"), ("已取消", "cancelled")):
+            self.status_combo.addItem(title, key)
+        self.status_combo.setAccessibleName("历史订单状态")
+        self.status_combo.setFixedWidth(132)
+        top.addWidget(self.status_combo)
         top.addWidget(action("查看小票 / 补打", self.preview, "primary"))
         layout.addLayout(top)
+        filters = hbox(spacing=10)
+        self.date_mode = QComboBox()
+        for title, key in (("单日", "day"), ("日期范围", "range"), ("不限日期", "all")):
+            self.date_mode.addItem(title, key)
+        self.date_mode.setAccessibleName("历史订单日期方式")
+        self.date_mode.setFixedWidth(122)
+        filters.addWidget(self.date_mode)
+        self.date = DateEdit()
+        self.date.setAccessibleName("账单日期 / 开始日期")
+        filters.addWidget(self.date)
+        self.to_label = text("至", "muted")
+        filters.addWidget(self.to_label)
+        self.end_date = DateEdit()
+        self.end_date.setAccessibleName("账单结束日期")
+        filters.addWidget(self.end_date)
+        filters.addStretch()
+        filters.addWidget(action("今日", self.show_today))
+        filters.addWidget(action("查询", self.search))
+        filters.addWidget(action("全部记录", self.show_all))
+        layout.addLayout(filters)
         self.view = data_table(["单号", "桌台", "结算 / 取消时间", "状态", "餐品合计", "实收 / 元", "打印状态"])
         self.view.itemDoubleClicked.connect(lambda *args: self.preview())
         layout.addWidget(self.view, 1)
         self.summary = text("", "muted")
         layout.addWidget(self.summary)
+        self.empty = text("当前筛选条件下没有历史订单", "small")
+        layout.addWidget(self.empty)
         outer.addWidget(content)
+        self.date_mode.currentIndexChanged.connect(self._mode_changed)
+        self.status_combo.currentIndexChanged.connect(lambda *args: self.search())
+        self.date.dateChanged.connect(lambda value: self._date_changed(True))
+        self.end_date.dateChanged.connect(lambda value: self._date_changed(False))
+        self._update_fields()
+
+    def _update_fields(self):
+        mode = self.date_mode.currentData()
+        self.date.setVisible(mode != "all")
+        self.end_date.setVisible(mode == "range")
+        self.to_label.setVisible(mode == "range")
+
+    def _mode_changed(self, *args):
+        self._update_fields()
+        self._date_changed(True)
+
+    def _date_changed(self, start_changed):
+        if self.date_mode.currentData() == "range" and self.date.date() > self.end_date.date():
+            other, value = (self.end_date, self.date.date()) if start_changed else (self.date, self.end_date.date())
+            other.blockSignals(True)
+            other.setDate(value)
+            other.blockSignals(False)
+        self.search()
 
     def refresh(self):
-        orders = self.app.store.history(self.filter_date)
+        mode = self.date_mode.currentData()
+        start = self.date.date().toString("yyyy-MM-dd") if mode != "all" else ""
+        end = self.end_date.date().toString("yyyy-MM-dd") if mode == "range" else start
+        orders = self.app.store.history(start, self.status_combo.currentData(), end)
         fill_table(self.view, [(order["id"], (f"SM{order['id']:08d}", order["table_name"], order["closed_at"],
                     "已结算" if order["status"] == "paid" else "已取消",
                     money(order["subtotal_cents"]) if order["status"] == "paid" else "—",
                     money(order["final_cents"]) if order["status"] == "paid" else "—",
                     order["print_status"] if order["status"] == "paid" else "—")) for order in orders])
         paid = [order for order in orders if order["status"] == "paid"]
-        self.summary.setText(f"已结算 {len(paid)} 单    ·    实收 ￥{money(sum(order['final_cents'] for order in paid))}    ·    已取消 {len(orders)-len(paid)} 单")
+        self.summary.setText(f"共 {len(orders)} 条    ·    已结算 {len(paid)} 单    ·    实收 ￥{money(sum(order['final_cents'] for order in paid))}    ·    已取消 {len(orders)-len(paid)} 单")
+        self.empty.setVisible(not orders)
 
     def search(self):
-        selected_date = self.date.text().strip()
-        self.app.store.history(selected_date)
-        self.filter_date = selected_date
-        self.refresh()
+        self.app.run_action(self.refresh)
+
+    def set_filters(self, start, end, status="all"):
+        widgets = (self.date, self.end_date, self.date_mode, self.status_combo)
+        for widget in widgets:
+            widget.blockSignals(True)
+        if start:
+            self.date.setDate(QDate.fromString(start, "yyyy-MM-dd"))
+            self.end_date.setDate(QDate.fromString(end or start, "yyyy-MM-dd"))
+        self.date_mode.setCurrentIndex(self.date_mode.findData("all" if not start else "day" if start == end else "range"))
+        self.status_combo.setCurrentIndex(self.status_combo.findData(status))
+        for widget in widgets:
+            widget.blockSignals(False)
+        self._update_fields()
+        self.search()
+
+    def show_today(self):
+        today = QDate.currentDate().toString("yyyy-MM-dd")
+        self.set_filters(today, today, self.status_combo.currentData())
 
     def show_all(self):
-        self.date.clear()
-        self.filter_date = ""
-        self.refresh()
+        self.set_filters("", "")
 
     def preview(self):
         order_id = selected_id(self.view)

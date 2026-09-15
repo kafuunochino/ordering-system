@@ -8,6 +8,7 @@ import sqlite3
 
 from .money import (MAX_CENTS, ValidationError, clean_text, discount_value,
                     discounted_cents, positive_int, to_cents)
+from .reports import date_bounds
 
 SCHEMA_VERSION = 2
 
@@ -338,24 +339,45 @@ class Store:
             paid["receipt_text"] = receipt
             return paid
 
-    def history(self, date: str = "") -> list[dict]:
-        if date:
-            try:
-                datetime.strptime(date, "%Y-%m-%d")
-            except ValueError:
-                raise ValidationError("日期格式为 YYYY-MM-DD，例如 2026-09-16。") from None
+    def history(self, date: str = "", status: str = "all", end_date: str = "") -> list[dict]:
+        if status not in ("all", "paid", "cancelled"):
+            raise ValidationError("请选择全部状态、已结算或已取消。")
         sql = "SELECT * FROM orders WHERE status!='open'"
-        args = ()
+        args = []
+        if status != "all":
+            sql += " AND status=?"
+            args.append(status)
+        if end_date and not date:
+            raise ValidationError("请选择开始日期。")
         if date:
-            sql += " AND substr(closed_at,1,10)=?"
-            args = (date,)
-        return [dict(row) for row in self.db.execute(sql + " ORDER BY id DESC", args)]
+            start, end = date_bounds(date, end_date or date)
+            sql += " AND closed_at>=? AND closed_at<?"
+            args.extend((start, end))
+        return [dict(row) for row in self.db.execute(sql + " ORDER BY closed_at DESC, id DESC", args)]
+
+    def revenue_report(self, start_date: str, end_date: str, group_by: str = "day") -> dict:
+        """一次聚合读取，汇总与明细使用同一快照；金额全程为整数分。"""
+        start, end = date_bounds(start_date, end_date)
+        if group_by not in ("day", "month"):
+            raise ValidationError("请选择按日或按月汇总。")
+        length = 10 if group_by == "day" else 7
+        rows = [dict(row) for row in self.db.execute("""
+            SELECT substr(closed_at,1,?) AS period, COUNT(*) AS count,
+                   SUM(subtotal_cents) AS subtotal_cents, SUM(base_cents) AS base_cents,
+                   SUM(base_cents-final_cents) AS discount_cents, SUM(final_cents) AS total_cents
+            FROM orders WHERE status='paid' AND closed_at>=? AND closed_at<?
+            GROUP BY period ORDER BY period DESC
+        """, (length, start, end))]
+        totals = {key: sum(row[key] for row in rows) for key in (
+            "count", "subtotal_cents", "base_cents", "discount_cents", "total_cents")}
+        count = totals["count"]
+        totals["average_cents"] = (totals["total_cents"] + count // 2) // count if count else 0
+        return dict(start_date=start_date, end_date=end_date, group_by=group_by, rows=rows, **totals)
 
     def today_summary(self) -> dict:
-        row = self.db.execute("SELECT COUNT(*) AS count, COALESCE(SUM(final_cents),0) AS total_cents "
-                               "FROM orders WHERE status='paid' AND substr(closed_at,1,10)=?",
-                               (datetime.now().strftime("%Y-%m-%d"),)).fetchone()
-        return dict(row)
+        today = datetime.now().strftime("%Y-%m-%d")
+        report = self.revenue_report(today, today)
+        return {key: report[key] for key in ("count", "total_cents")}
 
     def record_print(self, order_id: int, error: str = ""):
         with self.transaction():

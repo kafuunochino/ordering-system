@@ -35,7 +35,7 @@ def main():
         app.resize(1440, 900)
         for mode, index in (("light", 0), ("dark", 1)):
             app.theme_combo.setCurrentIndex(index)
-            for page, label in ((0, "cashier"), (1, "products"), (2, "tables"), (4, "settings")):
+            for page, label in ((0, "cashier"), (1, "products"), (2, "tables"), (5, "settings")):
                 app.navigate(page)
                 QTest.qWait(60)
                 app.grab().save(str(args.out_dir / f"{label}-{mode}.png"))

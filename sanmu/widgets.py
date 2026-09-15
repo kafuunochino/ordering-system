@@ -2,11 +2,13 @@
 
 from math import ceil
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPalette
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QDate, QLocale, QEvent
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPalette, QTextCharFormat
+from PySide6.QtWidgets import (QAbstractItemView, QCalendarWidget, QDateEdit, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
                                QLabel, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget, QStyle, QStyleOptionButton)
+                               QVBoxLayout, QWidget, QStyle, QStyleOptionButton, QToolButton, QApplication)
+
+from .theme import PALETTES
 
 
 class ComboBox(QComboBox):
@@ -19,6 +21,58 @@ class ComboBox(QComboBox):
         x, y = self.width() - 15, self.height() / 2
         painter.drawLine(QPointF(x - 4, y - 2), QPointF(x, y + 2))
         painter.drawLine(QPointF(x, y + 2), QPointF(x + 4, y - 2))
+        painter.end()
+
+
+class DateEdit(QDateEdit):
+    """带中文日历弹层的日期选择器；日历入口在深浅主题中均清晰可见。"""
+    def __init__(self, value=None):
+        super().__init__(value or QDate.currentDate())
+        self.setLocale(QLocale("zh_CN"))
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setDateRange(QDate(1900, 1, 1), QDate(9998, 12, 31))
+        self.setCalendarPopup(True)
+        self.setKeyboardTracking(False)
+        self.setFixedWidth(168)
+        self.setToolTip("点击右侧日历图标选择日期")
+        calendar = self.calendarWidget()
+        calendar.setLocale(self.locale())
+        calendar.setFirstDayOfWeek(Qt.Monday)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        calendar.setMinimumSize(320, 282)
+        self._update_calendar_theme()
+
+    def _update_calendar_theme(self):
+        calendar = self.calendarWidget()
+        if calendar is None:
+            return
+        colors = PALETTES[QApplication.instance().property("sanmuTheme") or "light"]
+        for name, direction in (("qt_calendar_prevmonth", "previous"), ("qt_calendar_nextmonth", "next")):
+            button = calendar.findChild(QToolButton, name)
+            if button:
+                button.setArrowType(Qt.NoArrow)
+                button.setIcon(line_icon(direction, colors["text"]))
+                button.setIconSize(QSize(16, 16))
+        weekend = QTextCharFormat()
+        weekend.setForeground(QColor(colors["danger"]))
+        calendar.setWeekdayTextFormat(Qt.Saturday, weekend)
+        calendar.setWeekdayTextFormat(Qt.Sunday, weekend)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.PaletteChange, QEvent.StyleChange) and self.calendarPopup():
+            self._update_calendar_theme()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(self.palette().color(QPalette.Text), 1.4, Qt.SolidLine, Qt.RoundCap))
+        x, y = self.width() - 25, self.height() / 2 - 7
+        painter.drawRoundedRect(QRectF(x, y, 14, 14), 2, 2)
+        painter.drawLine(QPointF(x, y + 5), QPointF(x + 14, y + 5))
+        for offset in (4, 10):
+            painter.drawLine(QPointF(x + offset, y - 2), QPointF(x + offset, y + 2))
         painter.end()
 
 
@@ -227,6 +281,14 @@ def line_icon(kind, color="#ABB5C5"):
         painter.drawEllipse(QRectF(3, 3, 18, 18))
         painter.drawLine(12, 7, 12, 12)
         painter.drawLine(12, 12, 16, 14)
+    elif kind == "revenue":
+        painter.drawLine(3, 21, 21, 21)
+        for x, top in ((5, 13), (11, 8), (17, 3)):
+            painter.drawRoundedRect(QRectF(x, top, 3, 18 - top), 1, 1)
+    elif kind in ("previous", "next"):
+        edge, tip = (15, 8) if kind == "previous" else (9, 16)
+        painter.drawLine(edge, 5, tip, 12)
+        painter.drawLine(tip, 12, edge, 19)
     elif kind == "settings":
         for y, x in ((6, 9), (12, 16), (18, 7)):
             painter.drawLine(3, y, 21, y)
